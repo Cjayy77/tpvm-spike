@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TPVM emitter</title>
+<style>
+  :root{
+    --bg:#131313; --ink:#f2efe9; --dim:#6f6b64; --rule:#2a2926;
+    --warn:#c8562f; --ok:#4a7c59;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;image-rendering:pixelated}
+  #hud{
+    position:fixed;top:0;left:0;width:340px;height:100%;
+    background:var(--bg);border-right:1px solid var(--rule);
+    color:var(--ink);font:13px/1.5 ui-monospace,"SF Mono",Menlo,monospace;
+    padding:24px 22px;overflow-y:auto;
+  }
+  #hud.hidden{display:none}
+  h1{font:500 15px/1.2 ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;
+     margin:0 0 4px;color:var(--ink)}
+  .sub{color:var(--dim);font-size:11px;letter-spacing:.06em;margin:0 0 22px}
+  h2{font:500 10px/1 ui-monospace,monospace;letter-spacing:.18em;text-transform:uppercase;
+     color:var(--dim);margin:24px 0 10px;padding-bottom:7px;border-bottom:1px solid var(--rule)}
+  .row{display:flex;justify-content:space-between;gap:12px;padding:3px 0}
+  .row span:last-child{color:var(--ink);font-variant-numeric:tabular-nums}
+  .k{color:var(--dim)}
+  kbd{background:#1e1d1b;border:1px solid var(--rule);border-radius:0;padding:1px 5px;
+      font:inherit;font-size:11px;color:var(--ink)}
+  .warn{color:var(--warn)} .ok{color:var(--ok)}
+  .note{color:var(--dim);font-size:11px;line-height:1.6;margin-top:8px}
+  ol{margin:8px 0 0;padding-left:18px;color:var(--dim);font-size:11px;line-height:1.7}
+  ol b{color:var(--ink);font-weight:500}
+  #drop{position:fixed;inset:0;background:rgba(19,19,19,.94);display:none;
+        align-items:center;justify-content:center;color:var(--ink);
+        font:14px ui-monospace,monospace;letter-spacing:.1em}
+  #drop.on{display:flex}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="drop">DROP AN IMAGE</div>
+
+<div id="hud">
+  <h1>TPVM emitter</h1>
+  <p class="sub">complementary subframe test rig</p>
+
+  <h2>Timing</h2>
+  <div class="row"><span class="k">refresh</span><span id="hz">—</span></div>
+  <div class="row"><span class="k">frame ms</span><span id="ms">—</span></div>
+  <div class="row"><span class="k">jitter</span><span id="jit">—</span></div>
+  <div class="row"><span class="k">drops</span><span id="drops">0</span></div>
+  <div class="row"><span class="k">uptime</span><span id="up">0s</span></div>
+  <p class="note" id="verdict"></p>
+
+  <h2>Modulation</h2>
+  <div class="row"><span class="k">state</span><span id="st">ON</span></div>
+  <div class="row"><span class="k">pattern</span><span id="pat">uniform</span></div>
+  <div class="row"><span class="k">amplitude</span><span id="amp">0.40</span></div>
+  <div class="row"><span class="k">headroom</span><span id="hr">adaptive</span></div>
+  <div class="row"><span class="k">source</span><span id="src">test chart</span></div>
+
+  <h2>Keys</h2>
+  <div class="row"><span class="k"><kbd>M</kbd></span><span>modulation on/off</span></div>
+  <div class="row"><span class="k"><kbd>1</kbd>–<kbd>4</kbd></span><span>pattern</span></div>
+  <div class="row"><span class="k"><kbd>↑</kbd><kbd>↓</kbd></span><span>amplitude ±.05</span></div>
+  <div class="row"><span class="k"><kbd>H</kbd></span><span>headroom mode</span></div>
+  <div class="row"><span class="k"><kbd>S</kbd></span><span>save reference png</span></div>
+  <div class="row"><span class="k"><kbd>F</kbd></span><span>fullscreen</span></div>
+  <div class="row"><span class="k"><kbd>Tab</kbd></span><span>hide this panel</span></div>
+  <p class="note">Drag an image anywhere to replace the chart.</p>
+
+  <h2>Capture run</h2>
+  <ol>
+    <li>Press <b>S</b> to save reference.png. That is your ground truth.</li>
+    <li><b>F</b> for fullscreen, <b>Tab</b> to hide the panel. Lights off, no other screens in frame.</li>
+    <li>Manual camera app. Lock ISO and white balance. Shoot video at each exposure:
+        <b>1/30, 1/60, 1/120, 1/250, 1/1000</b>. Ten seconds each.</li>
+    <li>Press <b>M</b> and shoot one more at 1/60. That is your control.</li>
+    <li>Look at the screen yourself. Sweep your eyes side to side across it — smearing
+        trails mean the phantom array is showing.</li>
+    <li>Run <b>attack.py</b> on each clip against reference.png.</li>
+  </ol>
+
+  <h2>Reading it</h2>
+  <p class="note">
+    Browsers cannot guarantee frame-accurate present. This rig tells you whether
+    banding appears on your hardware at all — it does not tell you how a native
+    D3D12 flip-model build would behave. Treat a good result as permission to
+    build the native version, not as the result.
+  </p>
+</div>
+
+<script>
+const cv = document.getElementById('gl');
+const gl = cv.getContext('webgl2', {antialias:false, preserveDrawingBuffer:true,
+                                    powerPreference:'high-performance'});
+if(!gl){ document.body.innerHTML='<p style="color:#fff;font:14px monospace;padding:40px">WebGL2 unavailable.</p>'; }
+
+const VS = `#version 300 es
+in vec2 p; out vec2 uv;
+void main(){ uv = vec2(p.x*.5+.5, .5-p.y*.5); gl_Position = vec4(p,0,1); }`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec2 uv; out vec4 frag;
+uniform sampler2D tex;
+uniform float amp;      // modulation amplitude 0..1
+uniform float sgn;      // +1 / -1 for this subframe
+uniform int   mode;     // 0 uniform 1 bars 2 fine 3 chroma
+uniform int   adaptive; // 1 = scale t by local headroom, 0 = fixed compress
+uniform int   on;
+uniform vec2  res;
+uniform float jitter;
+
+vec3 toLin(vec3 c){
+  return mix(c/12.92, pow((c+0.055)/1.055, vec3(2.4)), step(vec3(0.04045), c));
+}
+vec3 toSrgb(vec3 c){
+  c = clamp(c, 0.0, 1.0);
+  return mix(c*12.92, 1.055*pow(c, vec3(1.0/2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+
+void main(){
+  vec3 L = toLin(texture(tex, uv).rgb);
+
+  if(on == 0){ frag = vec4(toSrgb(L),1.0); return; }
+
+  // headroom: how far we can push before clipping, per channel, in linear light
+  vec3 head;
+  if(adaptive == 1){
+    head = min(L, 1.0 - L);              // keeps true black + true white
+  } else {
+    float h = 0.16;
+    L = L * (1.0 - 2.0*h) + h;           // compress range, uniform headroom
+    head = vec3(h);
+  }
+
+  float s = sgn * (1.0 + jitter);
+  vec3 t;
+
+  if(mode == 0){
+    t = head * amp * s;                                  // pure temporal
+  } else if(mode == 1){
+    float bars = step(0.5, fract(gl_FragCoord.y / 24.0));  // 12px bars
+    t = head * amp * s * (bars*2.0 - 1.0);
+  } else if(mode == 2){
+    float f = mod(gl_FragCoord.x + gl_FragCoord.y, 2.0);   // per-pixel checker
+    t = head * amp * s * (f*2.0 - 1.0);
+  } else {
+    // opposed chroma: R and B one way, G the other. Sums to grey for the eye,
+    // bands in colour for the sensor.
+    t = head * amp * s * vec3(1.0, -1.0, 1.0);
+  }
+
+  frag = vec4(toSrgb(L + t), 1.0);
+}`;
+
+function sh(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+gl.bindAttribLocation(prog, 0, 'p');
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+const U = {};
+for(const n of ['tex','amp','sgn','mode','adaptive','on','res','jitter'])
+  U[n] = gl.getUniformLocation(prog, n);
+
+/* ---- source image: built-in chart, replaceable by drag-drop ---- */
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function chart(){
+  const c = document.createElement('canvas'); c.width = 1920; c.height = 1080;
+  const x = c.getContext('2d');
+  x.fillStyle = '#000'; x.fillRect(0,0,1920,1080);
+
+  // horizontal luminance ramp — shows contrast loss and any gamma lift
+  const g = x.createLinearGradient(0,0,1920,0);
+  g.addColorStop(0,'#000'); g.addColorStop(1,'#fff');
+  x.fillStyle = g; x.fillRect(0, 60, 1920, 150);
+
+  // 11-step grey wedge — the SSIM anchor
+  for(let i=0;i<11;i++){
+    const v = Math.round(i*255/10);
+    x.fillStyle = `rgb(${v},${v},${v})`;
+    x.fillRect(i*174.5, 240, 174.5, 130);
+  }
+
+  // colour bars
+  const bars = ['#ff0000','#00ff00','#0000ff','#00ffff','#ff00ff','#ffff00'];
+  bars.forEach((b,i)=>{ x.fillStyle=b; x.fillRect(i*320, 400, 320, 110); });
+
+  // frequency sweep — where moire and destriping artefacts show first
+  for(let px=0; px<1920; px++){
+    const f = 0.02 + (px/1920)*0.9;
+    const v = Math.round(127 + 110*Math.sin(px*f));
+    x.fillStyle = `rgb(${v},${v},${v})`;
+    x.fillRect(px, 540, 1, 150);
+  }
+
+  // text at descending sizes — legibility is the honest quality metric
+  x.fillStyle = '#e8e4dc';
+  [[44,760],[30,820],[20,868],[13,906]].forEach(([s,y])=>{
+    x.font = `${s}px ui-monospace, monospace`;
+    x.fillText('The quick brown fox jumps over the lazy dog 0123456789', 40, y);
+  });
+
+  // dark-end patches — adaptive headroom leaves these least protected
+  for(let i=0;i<8;i++){
+    const v = i*4;
+    x.fillStyle = `rgb(${v},${v},${v})`;
+    x.fillRect(40 + i*90, 950, 80, 80);
+  }
+  // registration marks for the attack script's corner picking
+  x.fillStyle='#fff';
+  [[0,0],[1900,0],[0,1060],[1900,1060]].forEach(([a,b])=>x.fillRect(a,b,20,20));
+  return c;
+}
+
+let srcCanvas = chart();
+function upload(img){
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+}
+upload(srcCanvas);
+
+/* ---- state ---- */
+const S = { on:true, amp:0.40, mode:0, adaptive:true, sign:1, jitter:0 };
+const modeNames = ['uniform','bars 12px','checker 1px','chroma'];
+
+/* ---- timing telemetry ---- */
+let last = performance.now(), t0 = last, frames = 0, drops = 0;
+let win = [], nominal = 0;
+
+function resize(){
+  const w = Math.floor(innerWidth * devicePixelRatio);
+  const h = Math.floor(innerHeight * devicePixelRatio);
+  if(cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; }
+}
+
+function draw(now){
+  requestAnimationFrame(draw);
+  resize();
+
+  const dt = now - last; last = now;
+  frames++;
+  win.push(dt); if(win.length > 240) win.shift();
+
+  if(frames === 90){
+    const sorted = [...win].sort((a,b)=>a-b);
+    nominal = sorted[Math.floor(sorted.length/2)];
+  }
+  if(nominal && dt > nominal * 1.5) drops++;
+
+  // alternate subframe polarity every present
+  S.sign = -S.sign;
+  // mode 3 gets slight amplitude jitter; balanced within each pair
+  S.jitter = (S.mode === 3 && S.sign > 0) ? (Math.random()*0.2 - 0.1) : S.jitter;
+
+  gl.viewport(0,0,cv.width,cv.height);
+  gl.useProgram(prog); gl.bindVertexArray(vao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.uniform1i(U.tex, 0);
+  gl.uniform1f(U.amp, S.amp);
+  gl.uniform1f(U.sgn, S.sign);
+  gl.uniform1i(U.mode, S.mode);
+  gl.uniform1i(U.adaptive, S.adaptive ? 1 : 0);
+  gl.uniform1i(U.on, S.on ? 1 : 0);
+  gl.uniform1f(U.jitter, S.jitter);
+  gl.uniform2f(U.res, cv.width, cv.height);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  if(frames % 20 === 0) hud(now);
+}
+
+function hud(now){
+  if(!nominal) return;
+  const mean = win.reduce((a,b)=>a+b,0) / win.length;
+  const sd = Math.sqrt(win.reduce((a,b)=>a+(b-mean)**2,0) / win.length);
+  const hz = 1000 / nominal;
+
+  set('hz', hz.toFixed(1) + ' Hz');
+  set('ms', mean.toFixed(2));
+  set('jit', '±' + sd.toFixed(2) + ' ms');
+  set('drops', drops);
+  set('up', ((now - t0)/1000).toFixed(0) + 's');
+
+  const v = document.getElementById('verdict');
+  const rate = drops / (frames/1000);
+  if(hz < 100){
+    v.className = 'note warn';
+    v.textContent = 'Below 100 Hz. Two-frame complementarity will be visible as flicker. '
+                  + 'Find a 120 Hz+ panel before trusting anything you see here.';
+  } else if(sd > nominal * 0.15 || rate > 1){
+    v.className = 'note warn';
+    v.textContent = 'Timing is unstable. Dropped subframes break complementarity — the '
+                  + 'pattern leaks to the eye. Close other windows, disable VRR, retest.';
+  } else {
+    v.className = 'note ok';
+    v.textContent = 'Timing stable enough to capture against.';
+  }
+
+  set('st', S.on ? 'ON' : 'OFF — control');
+  set('pat', modeNames[S.mode]);
+  set('amp', S.amp.toFixed(2));
+  set('hr', S.adaptive ? 'adaptive' : 'fixed 16%');
+}
+const set = (id,v)=>{ document.getElementById(id).textContent = v; };
+
+addEventListener('keydown', e=>{
+  const k = e.key.toLowerCase();
+  if(k === 'm'){ S.on = !S.on; }
+  else if(k === 'h'){ S.adaptive = !S.adaptive; }
+  else if(k === 'f'){ document.documentElement.requestFullscreen?.(); }
+  else if(k === 's'){ save(); }
+  else if(e.key === 'Tab'){ e.preventDefault(); document.getElementById('hud').classList.toggle('hidden'); }
+  else if(e.key === 'ArrowUp'){ S.amp = Math.min(1, S.amp + 0.05); }
+  else if(e.key === 'ArrowDown'){ S.amp = Math.max(0, S.amp - 0.05); }
+  else if('1234'.includes(k)){ S.mode = +k - 1; }
+  else return;
+  hud(performance.now());
+});
+
+function save(){
+  srcCanvas.toBlob(b=>{
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = 'reference.png'; a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+
+const dz = document.getElementById('drop');
+addEventListener('dragover', e=>{ e.preventDefault(); dz.classList.add('on'); });
+addEventListener('dragleave', ()=> dz.classList.remove('on'));
+addEventListener('drop', e=>{
+  e.preventDefault(); dz.classList.remove('on');
+  const f = e.dataTransfer.files[0]; if(!f || !f.type.startsWith('image/')) return;
+  const img = new Image();
+  img.onload = ()=>{
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+    srcCanvas = c; upload(c); set('src', f.name);
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(f);
+});
+
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
