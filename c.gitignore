@@ -1,0 +1,13 @@
+# capture artefacts — large, machine-specific, not reproducible
+*.mp4
+*.mov
+*.MOV
+reference.png
+best_recovery.png
+captures/
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
