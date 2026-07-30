@@ -2,7 +2,7 @@
 
 A test rig for **temporal psychovisual modulation** — displaying an image that
 looks normal to a human eye but degrades when a camera photographs the screen.
- 
+  
 This is a research spike, not a product. Its only job is to answer one question
 on real hardware before any real engineering starts:
 
